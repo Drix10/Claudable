@@ -156,15 +156,18 @@ async def install_dependencies_background(project_id: str, project_path: str):
     try:
         import subprocess
         import os
+        import platform
         
         # Check if package.json exists
         package_json_path = os.path.join(project_path, "package.json")
         if os.path.exists(package_json_path):
             print(f"Installing dependencies for project {project_id}...")
             
+            npm_command = "npm.cmd" if platform.system() == "Windows" else "npm"
+            
             # Run npm install in background
             process = await asyncio.create_subprocess_exec(
-                "npm", "install",
+                npm_command, "install",
                 cwd=project_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
@@ -194,10 +197,7 @@ async def install_project_dependencies(
     if not project.repo_path:
         raise HTTPException(status_code=400, detail="Project repository path not found")
     
-    # Add background task for dependency installation
-    background_tasks.add_task(install_dependencies_background, project_id, project.repo_path)
-    
-    return {"message": "Dependency installation started in background", "project_id": project_id}
+    return {"message": "Dependency installation is handled by the preview server.", "project_id": project_id}
 
 
 @router.get("/health")

@@ -81,15 +81,13 @@ export const CLI_OPTIONS: CLIOption[] = [
   {
     id: 'gemini',
     name: 'Gemini',
-    description: '(Coming Soon)',
+    description: 'Google Gemini with advanced reasoning',
     available: true,
     configured: false,
-    enabled: false,
+    enabled: true,
     models: [
       { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
       { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
-      { id: 'gemini-pro', name: 'Gemini Pro' },
-      { id: 'gemini-ultra', name: 'Gemini Ultra' }
     ]
   },
   {

@@ -1,8 +1,13 @@
 import os
-import shutil
-import subprocess
+import logging
+import aiofiles
+import asyncio
+import platform
+from typing import List, Dict, Any
 from pathlib import Path
+import subprocess
 from typing import Optional
+import shutil
 
 
 def ensure_dir(path: str) -> None:
@@ -17,7 +22,6 @@ def init_git_repo(repo_path: str) -> None:
 
 def scaffold_nextjs_minimal(repo_path: str) -> None:
     """Create Next.js project using official create-next-app"""
-    import subprocess
     import tempfile
     import shutil
     
@@ -56,7 +60,8 @@ def scaffold_nextjs_minimal(repo_path: str) -> None:
             capture_output=True, 
             text=True,
             env=env,
-            timeout=300  # 5 minute timeout
+            timeout=300,  # 5 minute timeout
+            shell=platform.system() == "Windows"
         )
         
         ui.success(f"Created Next.js app: {result.stdout}", "Filesystem")

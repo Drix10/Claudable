@@ -9,6 +9,7 @@ import re
 from contextlib import closing
 from typing import Optional, Dict
 from app.core.config import settings
+import platform
 
 
 # Global process registry to track running Next.js processes
@@ -326,13 +327,17 @@ def start_preview_process(project_id: str, repo_path: str, port: Optional[int] =
         # Only install dependencies if needed
         if _should_install_dependencies(repo_path):
             print(f"Installing dependencies for project {project_id}...")
+            
+            npm_command = "npm.cmd" if platform.system() == "Windows" else "npm"
+            
             install_result = subprocess.run(
-                ["npm", "install"],
+                [npm_command, "install"],
                 cwd=repo_path,
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=120  # 2 minutes timeout for npm install
+                timeout=120,  # 2 minutes timeout for npm install
+                shell=platform.system() == "Windows"
             )
             
             if install_result.returncode != 0:
@@ -353,7 +358,8 @@ def start_preview_process(project_id: str, repo_path: str, port: Optional[int] =
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            preexec_fn=os.setsid  # Create new process group for easier cleanup
+            preexec_fn=os.setsid if platform.system() != "Windows" else None,  # Create new process group for easier cleanup
+            shell=platform.system() == "Windows"
         )
         
         # Wait a moment for the server to start
@@ -398,14 +404,20 @@ def stop_preview_process(project_id: str, cleanup_cache: bool = False) -> None:
     if process:
         try:
             # Terminate the entire process group
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            if platform.system() == "Windows":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)])
+            else:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
             
             # Wait for process to terminate gracefully
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 # Force kill if it doesn't terminate gracefully
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                if platform.system() == "Windows":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)])
+                else:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
                 process.wait()
                 
             print(f"Stopped Next.js dev server for project {project_id} (PID: {process.pid})")
@@ -430,7 +442,8 @@ def stop_preview_process(project_id: str, cleanup_cache: bool = False) -> None:
                     ["npm", "cache", "clean", "--force"],
                     cwd=repo_path,
                     capture_output=True,
-                    timeout=30
+                    timeout=30,
+                    shell=platform.system() == "Windows"
                 )
                 print(f"Cleaned npm cache for project {project_id}")
         except Exception as e:

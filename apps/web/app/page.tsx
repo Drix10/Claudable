@@ -13,10 +13,10 @@ const fetchAPI = globalThis.fetch || fetch;
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8080';
 
-type Project = { 
-  id: string; 
-  name: string; 
-  status?: string; 
+type Project = {
+  id: string;
+  name: string;
+  status?: string;
   preview_url?: string | null;
   created_at: string;
   last_active_at?: string | null;
@@ -55,6 +55,10 @@ export default function HomePage() {
       { id: 'gpt-5', name: 'GPT-5' },
       { id: 'claude-sonnet-4', name: 'Claude Sonnet 4' },
       { id: 'claude-opus-4.1', name: 'Claude Opus 4.1' }
+    ],
+    gemini: [
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' }
     ]
   };
   
@@ -343,7 +347,7 @@ export default function HomePage() {
       const response = await fetchAPI(`${API_BASE}/api/projects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           project_id: projectId,
           name: prompt.slice(0, 50) + (prompt.length > 50 ? '...' : ''),
           initial_prompt: prompt.trim(), // Use original prompt first
@@ -486,6 +490,8 @@ export default function HomePage() {
       setSelectedModel('claude-sonnet-4');
     } else if (assistant === 'cursor') {
       setSelectedModel('gpt-5');
+    } else if (assistant === 'gemini') {
+      setSelectedModel('gemini-2.5-pro');
     }
     
     setShowAssistantDropdown(false);
@@ -493,7 +499,8 @@ export default function HomePage() {
 
   const assistantOptions = [
     { id: 'claude', name: 'Claude Code', icon: '/claude.png' },
-    { id: 'cursor', name: 'Cursor Agent', icon: '/cursor.png' }
+    { id: 'cursor', name: 'Cursor Agent', icon: '/cursor.png' },
+    { id: 'gemini', name: 'Gemini CLI', icon: '/gemini.png' }
   ];
 
   return (
@@ -504,10 +511,10 @@ export default function HomePage() {
         <div 
           className="absolute inset-0 dark:block hidden"
           style={{
-            background: `radial-gradient(circle at 50% 100%, 
-              rgba(222, 115, 86, 0.4) 0%, 
-              rgba(222, 115, 86, 0.3) 25%, 
-              rgba(222, 115, 86, 0.2) 50%, 
+            background: `radial-gradient(circle at 50% 100%,
+              rgba(222, 115, 86, 0.4) 0%,
+              rgba(222, 115, 86, 0.3) 25%,
+              rgba(222, 115, 86, 0.2) 50%,
               transparent 70%)`
           }}
         />
@@ -515,9 +522,9 @@ export default function HomePage() {
         <div 
           className="absolute inset-0 block dark:hidden"
           style={{
-            background: `radial-gradient(circle at 50% 100%, 
-              rgba(222, 115, 86, 0.25) 0%, 
-              rgba(222, 115, 86, 0.15) 25%, 
+            background: `radial-gradient(circle at 50% 100%,
+              rgba(222, 115, 86, 0.25) 0%,
+              rgba(222, 115, 86, 0.15) 25%,
               transparent 50%)`
           }}
         />
@@ -733,7 +740,7 @@ export default function HomePage() {
               onDragLeave={handleDragLeave}
               onDragOver={handleDragOver}
               onDrop={handleDrop}
-              className={`group flex flex-col gap-4 p-4 w-full rounded-[28px] border backdrop-blur-xl text-base shadow-xl transition-all duration-150 ease-in-out mb-6 relative ${
+              className={`group flex flex-col gap-4 p-4 w-full rounded-[28px] border backdrop-blur-xl text-base shadow-xl transition-all duration-150 ease-in-out mb-6 relative ${ 
                 isDragOver 
                   ? 'border-[#DE7356] bg-[#DE7356]/10 dark:bg-[#DE7356]/20' 
                   : 'border-gray-200 dark:border-white/10 bg-white dark:bg-black/20 focus-within:border-gray-300 dark:focus-within:border-white/20 hover:border-gray-300 dark:hover:border-white/15 focus-within:hover:border-gray-400 dark:focus-within:hover:border-white/20'
@@ -816,13 +823,13 @@ export default function HomePage() {
                   >
                     <div className="w-4 h-4 rounded overflow-hidden">
                       <img 
-                        src={selectedAssistant === 'claude' ? '/claude.png' : '/cursor.png'} 
-                        alt={selectedAssistant === 'claude' ? 'Claude' : 'Cursor'}
+                        src={assistantOptions.find(o => o.id === selectedAssistant)?.icon || ''} 
+                        alt={assistantOptions.find(o => o.id === selectedAssistant)?.name || ''}
                         className="w-full h-full object-contain"
                       />
                     </div>
                     <span className="hidden md:flex text-xs">
-                      {selectedAssistant === 'claude' ? 'Claude Code' : 'Cursor Agent'}
+                      {assistantOptions.find(o => o.id === selectedAssistant)?.name}
                     </span>
                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 -960 960 960" className={`shrink-0 transition-transform ${showAssistantDropdown ? 'rotate-0' : 'rotate-90'}`} fill="currentColor">
                       <path d="M530-481 353-658q-9-9-8.5-21t9.5-21 21.5-9 21.5 9l198 198q5 5 7 10t2 11-2 11-7 10L396-261q-9 9-21 8.5t-21-9.5-9-21.5 9-21.5z"/>
@@ -935,7 +942,7 @@ export default function HomePage() {
             
             {/* Example Cards */}
             <div className="flex flex-wrap gap-2 justify-center mt-8">
-              {[
+              {[ 
                 { 
                   text: 'Reporting Dashboard',
                   prompt: 'Create a dashboard for small business owners. It should be able to track revenue, expenses, and customer growth. Include charts, filters, and the ability to export reports.'
@@ -944,15 +951,15 @@ export default function HomePage() {
                   text: 'Gaming Platform',
                   prompt: 'Build a web-based game that helps kids practice math skills through interactive challenges. Include levels, progress tracking, and rewards for completing tasks.'
                 },
-                { 
+                {
                   text: 'Onboarding Portal',
                   prompt: 'Design an onboarding portal that guides new employees through key company policies, values, and team introductions. Make it feel welcoming, interactive, and easy to follow.'
                 },
-                { 
+                {
                   text: 'Networking App',
                   prompt: 'Create a networking app for first-time startup founders to connect based on location, industry, and funding stage. Include profiles, messaging, and event discovery.'
                 },
-                { 
+                {
                   text: 'Room Visualizer',
                   prompt: 'Build a tool where users can upload a photo of their room and apply different interior design styles using AI. Let them save, compare, and share their styled images.'
                 }
@@ -1041,7 +1048,7 @@ export default function HomePage() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 50, scale: 0.9 }}
           >
-            <div className={`px-6 py-4 rounded-lg shadow-lg border flex items-center gap-3 max-w-sm backdrop-blur-lg ${
+            <div className={`px-6 py-4 rounded-lg shadow-lg border flex items-center gap-3 max-w-sm backdrop-blur-lg ${ 
               toast.type === 'success'
                 ? 'bg-green-500/20 border-green-500/30 text-green-400'
                 : 'bg-red-500/20 border-red-500/30 text-red-400'

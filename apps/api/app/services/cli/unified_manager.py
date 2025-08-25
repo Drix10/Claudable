@@ -5,6 +5,7 @@ Supports Claude Code SDK, Cursor Agent, Qwen Code, Gemini CLI, and Codex CLI
 import asyncio
 import json
 import os
+import re
 import subprocess
 import uuid
 from abc import ABC, abstractmethod
@@ -13,6 +14,9 @@ from typing import Optional, Callable, Dict, Any, AsyncGenerator, List
 from enum import Enum
 import tempfile
 import base64
+import platform
+
+from app.core.monitoring import monitor_tool_execution
 
 
 def get_project_root() -> str:
@@ -73,6 +77,10 @@ MODEL_MAPPING = {
         "claude-opus-4.1": "opus-4.1",
         "claude-sonnet-4-20250514": "sonnet-4",
         "claude-opus-4-1-20250805": "opus-4.1"
+    },
+    "gemini": {
+        "gemini-2.5-pro": "gemini-2.5-pro",
+        "gemini-2.5-flash": "gemini-2.5-flash",
     }
 }
 
@@ -80,6 +88,7 @@ MODEL_MAPPING = {
 class CLIType(str, Enum):
     CLAUDE = "claude"
     CURSOR = "cursor"
+    GEMINI = "gemini"
 
 
 class BaseCLI(ABC):
@@ -139,7 +148,8 @@ class BaseCLI(ABC):
         log_callback: Optional[Callable] = None,
         images: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None,
-        is_initial_prompt: bool = False
+        is_initial_prompt: bool = False,
+        unified_cli_manager: 'UnifiedCLIManager' = None
     ) -> AsyncGenerator[Message, None]:
         """Execute instruction and yield messages in real-time"""
         pass
@@ -525,7 +535,8 @@ class ClaudeCodeCLI(BaseCLI):
         log_callback: Optional[Callable] = None,
         images: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None,
-        is_initial_prompt: bool = False
+        is_initial_prompt: bool = False,
+        unified_cli_manager: 'UnifiedCLIManager' = None
     ) -> AsyncGenerator[Message, None]:
         """Execute instruction using Claude Code Python SDK"""
         from app.core.terminal_ui import ui
@@ -658,8 +669,10 @@ node_modules/
                                 ResultMessage = type(None)
                         
                         # Handle SystemMessage for session_id extraction
-                        if (isinstance(message_obj, SystemMessage) or 
-                            'SystemMessage' in str(type(message_obj))):
+                        if (
+                            isinstance(message_obj, SystemMessage) or 
+                            'SystemMessage' in str(type(message_obj))
+                        ):
                             # Extract session_id if available
                             if hasattr(message_obj, 'session_id') and message_obj.session_id:
                                 claude_session_id = message_obj.session_id
@@ -685,8 +698,10 @@ node_modules/
                             yield init_message
                         
                         # Handle AssistantMessage (complete messages)
-                        elif (isinstance(message_obj, AssistantMessage) or 
-                              'AssistantMessage' in str(type(message_obj))):
+                        elif (
+                            isinstance(message_obj, AssistantMessage) or 
+                            'AssistantMessage' in str(type(message_obj))
+                        ):
                             
                             content = ""
                             
@@ -750,8 +765,10 @@ node_modules/
                                 yield text_message
                         
                         # Handle UserMessage (tool results, etc.)
-                        elif (isinstance(message_obj, UserMessage) or 
-                              'UserMessage' in str(type(message_obj))):
+                        elif (
+                            isinstance(message_obj, UserMessage) or 
+                            'UserMessage' in str(type(message_obj))
+                        ):
                             # UserMessage has content: str according to types.py
                             # UserMessages are typically tool results - we don't need to show them
                             pass
@@ -1055,7 +1072,8 @@ class CursorAgentCLI(BaseCLI):
         log_callback: Optional[Callable] = None,
         images: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None,
-        is_initial_prompt: bool = False
+        is_initial_prompt: bool = False,
+        unified_cli_manager: 'UnifiedCLIManager' = None
     ) -> AsyncGenerator[Message, None]:
         """Execute Cursor Agent CLI with stream-json format and session continuity"""
         # Ensure AGENT.md exists for system prompt
@@ -1104,12 +1122,21 @@ class CursorAgentCLI(BaseCLI):
             project_repo_path = project_path # Fallback to project_path if repo subdir doesn't exist
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=project_repo_path
-            )
+            command_str = ' '.join(cmd)
+            if platform.system() == "Windows":
+                process = await asyncio.create_subprocess_shell(
+                    command_str,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_repo_path
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_repo_path
+                )
             
             cursor_session_id = None
             assistant_message_buffer = ""
@@ -1232,7 +1259,7 @@ class CursorAgentCLI(BaseCLI):
                     created_at=datetime.utcnow()
                 )
 
-            await process.wait()
+            await process.wait() 
             
             # Log completion
             if cursor_session_id:
@@ -1304,6 +1331,241 @@ class CursorAgentCLI(BaseCLI):
         print(f"💾 [Cursor] Session ID stored in memory for project {project_id}: {session_id}")
 
 
+import socket
+import tempfile
+
+class GeminiCLI(BaseCLI):
+    """Gemini CLI implementation"""
+
+    def __init__(self):
+        super().__init__(CLIType.GEMINI)
+        self._session_store: Dict[str, str] = {}
+
+    def _find_free_port(self):
+        """Finds a free port on localhost."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            return s.getsockname()[1]
+
+    async def check_availability(self) -> Dict[str, Any]:
+        """Check if Gemini CLI is available"""
+        try:
+            result = await asyncio.create_subprocess_shell(
+                "gemini -h",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+            
+            if result.returncode != 0:
+                return {
+                    "available": False,
+                    "configured": False,
+                    "error": "Gemini CLI not installed or not working.\n\nTo install:\n1. Install Gemini CLI: npm install -g @google/generative-ai-cli\n2. Configure API Key: gemini config set GOOGLE_API_KEY <your_key>"
+                }
+            
+            help_output = stdout.decode() + stderr.decode()
+            if "gemini" not in help_output.lower():
+                return {
+                    "available": False,
+                    "configured": False,
+                    "error": "Gemini CLI not responding correctly."
+                }
+            
+            return {
+                "available": True,
+                "configured": True,
+                "models": self.get_supported_models(),
+                "default_models": ["gemini-2.5-pro", "gemini-2.5-flash"]
+            }
+        except Exception as e:
+            return {
+                "available": False,
+                "configured": False,
+                "error": f"Failed to check Gemini CLI: {str(e)}"
+            }
+
+    async def execute_with_streaming(
+        self,
+        instruction: str,
+        project_path: str,
+        session_id: Optional[str] = None,
+        log_callback: Optional[Callable] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        is_initial_prompt: bool = False,
+        unified_cli_manager: 'UnifiedCLIManager' = None
+    ) -> AsyncGenerator[Message, None]:
+        """Execute instruction using Gemini CLI with a dynamically managed MCP server."""
+        from app.core.terminal_ui import ui
+        
+        mcp_server_process = None
+        settings_file = None
+        try:
+            # 1. Start MCP Server on a free port
+            port = self._find_free_port()
+            ui.info(f"Starting MCP server on port {port}", "GeminiCLI")
+            
+            # Correctly locate the mcp_server.main module
+            mcp_server_module_path = "app.services.cli.mcp_server.main"
+
+            mcp_server_process = await asyncio.create_subprocess_exec(
+                "python", "-m", mcp_server_module_path, "--port", str(port),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await asyncio.sleep(2)  # Give server time to start
+
+            # 2. Create a temporary settings file for Gemini CLI
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".json") as sf:
+                settings_file = sf.name
+                mcp_server_config = {
+                    "mcpServers": [{
+                        "name": "claudable-tools",
+                        "transport": "http",
+                        "command": ["python", "-m", mcp_server_module_path, "--port", str(port)],
+                        "readiness": {"http": "/tools"}
+                    }]
+                }
+                json.dump(mcp_server_config, sf)
+            
+            ui.debug(f"Created temporary Gemini settings file: {settings_file}", "GeminiCLI")
+
+            # 3. Invoke gemini Command
+            cmd = [
+                "gemini",
+                "-p", instruction,
+                "--allowed-mcp-server-names", "claudable-tools"
+            ]
+            cli_model = self._get_cli_model_name(model)
+            if cli_model:
+                cmd.extend(["--model", cli_model])
+
+            ui.info(f"Executing Gemini command: {' '.join(cmd)}", "GeminiCLI")
+            
+            if platform.system() == "Windows":
+                # Use list2cmdline to safely quote arguments for the shell
+                command_str = subprocess.list2cmdline(cmd)
+                process = await asyncio.create_subprocess_shell(
+                    command_str,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_path,
+                    env={**os.environ, "GEMINI_SETTINGS_PATH": settings_file}
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_path,
+                    env={**os.environ, "GEMINI_SETTINGS_PATH": settings_file}
+                )
+
+            # 4. Process Output Stream
+            buffer = ""
+            async for line in process.stdout:
+                line_str = line.decode()
+                buffer += line_str
+
+                # Process buffer line by line
+                while '\n' in buffer:
+                    line_to_process, buffer = buffer.split('\n', 1)
+                    line_to_process = line_to_process.strip()
+                    if not line_to_process:
+                        continue
+
+                    try:
+                        # Attempt to parse as JSON (tool call, etc.)
+                        data = json.loads(line_to_process)
+                        # Here you would add logic to handle different JSON structures
+                        # For now, we'll just yield it as a generic message
+                        yield Message(
+                            id=str(uuid.uuid4()),
+                            project_id=project_path,
+                            role="assistant",
+                            message_type="tool_use", # Assuming JSON is a tool call
+                            content=json.dumps(data, indent=2),
+                            metadata_json={"cli_type": self.cli_type.value, "parsed_json": True, "data": data},
+                            session_id=session_id,
+                            created_at=datetime.utcnow()
+                        )
+                    except json.JSONDecodeError:
+                        # If not JSON, treat as plain text
+                        yield Message(
+                            id=str(uuid.uuid4()),
+                            project_id=project_path,
+                            role="assistant",
+                            message_type="chat",
+                            content=line_to_process,
+                            metadata_json={"cli_type": self.cli_type.value},
+                            session_id=session_id,
+                            created_at=datetime.utcnow()
+                        )
+            
+            # Process any remaining buffer content
+            if buffer.strip():
+                yield Message(
+                    id=str(uuid.uuid4()),
+                    project_id=project_path,
+                    role="assistant",
+                    message_type="chat",
+                    content=buffer.strip(),
+                    metadata_json={"cli_type": self.cli_type.value},
+                    session_id=session_id,
+                    created_at=datetime.utcnow()
+                )
+
+            stderr_output = await process.stderr.read()
+            if stderr_output:
+                ui.error(f"Gemini CLI stderr: {stderr_output.decode()}", "GeminiCLI")
+                yield Message(
+                    id=str(uuid.uuid4()),
+                    project_id=project_path,
+                    role="assistant",
+                    message_type="error",
+                    content=stderr_output.decode().strip(),
+                    metadata_json={"cli_type": self.cli_type.value},
+                    session_id=session_id,
+                    created_at=datetime.utcnow()
+                )
+
+        except Exception as e:
+            ui.error(f"An exception occurred during Gemini CLI execution: {e}", "GeminiCLI")
+            yield Message(
+                id=str(uuid.uuid4()),
+                project_id=project_path,
+                role="assistant",
+                message_type="error",
+                content=str(e),
+                metadata_json={"cli_type": self.cli_type.value, "exception": True},
+                session_id=session_id,
+                created_at=datetime.utcnow()
+            )
+        finally:
+            # 5. Shutdown MCP Server and clean up
+            if mcp_server_process:
+                try:
+                    mcp_server_process.terminate()
+                    await mcp_server_process.wait()
+                    ui.info("MCP server terminated.", "GeminiCLI")
+                except ProcessLookupError:
+                    ui.warning("MCP server process already terminated.", "GeminiCLI")
+
+            if settings_file and os.path.exists(settings_file):
+                os.remove(settings_file)
+                ui.debug(f"Removed temporary settings file: {settings_file}", "GeminiCLI")
+
+
+    async def get_session_id(self, project_id: str) -> Optional[str]:
+        """Get current session ID for project"""
+        return self._session_store.get(project_id)
+
+    async def set_session_id(self, project_id: str, session_id: str) -> None:
+        """Set session ID for project"""
+        self._session_store[project_id] = session_id
+
+
 
 
 
@@ -1327,7 +1589,8 @@ class UnifiedCLIManager:
         # Initialize CLI adapters with database session
         self.cli_adapters = {
             CLIType.CLAUDE: ClaudeCodeCLI(),  # Use SDK implementation if available
-            CLIType.CURSOR: CursorAgentCLI(db_session=db)
+            CLIType.CURSOR: CursorAgentCLI(db_session=db),
+            CLIType.GEMINI: GeminiCLI()
         }
     
     async def execute_instruction(
@@ -1405,7 +1668,8 @@ class UnifiedCLIManager:
             log_callback=log_callback,
             images=images,
             model=model,
-            is_initial_prompt=is_initial_prompt
+            is_initial_prompt=is_initial_prompt,
+            unified_cli_manager=self
         ):
             message_count += 1
             
@@ -1429,9 +1693,9 @@ class UnifiedCLIManager:
                     ui.info(f"   Full event: {original_event}", "DEBUG")
                     ui.info(f"   is_error: {is_error}", "DEBUG")
                     ui.info(f"   subtype: '{subtype}'", "DEBUG")
-                    ui.info(f"   has event.result: {'result' in original_event}", "DEBUG")
-                    ui.info(f"   has event.status: {'status' in original_event}", "DEBUG")
-                    ui.info(f"   has event.success: {'success' in original_event}", "DEBUG")
+                    ui.info(f"   has event.result: {{'result' in original_event}}", "DEBUG")
+                    ui.info(f"   has event.status: {{'status' in original_event}}", "DEBUG")
+                    ui.info(f"   has event.success: {{'success' in original_event}}", "DEBUG")
                     
                     if is_error or subtype == "error":
                         has_error = True
@@ -1494,8 +1758,13 @@ class UnifiedCLIManager:
             success = result_success
             ui.info(f"Using Cursor result_success: {result_success}", "CLI")
         else:
-            success = not has_error
-            ui.info(f"Using has_error logic: not {has_error} = {success}", "CLI")
+            # If there are no messages and no errors, it's a failure
+            if len(messages_collected) == 0 and not has_error:
+                success = False
+                ui.error("Streaming completed with no messages and no explicit error.", "CLI")
+            else:
+                success = not has_error
+                ui.info(f"Using has_error logic: not {has_error} = {success}", "CLI")
         
         if success:
             ui.success(f"Streaming completed successfully. Total messages: {len(messages_collected)}", "CLI")
@@ -1506,7 +1775,7 @@ class UnifiedCLIManager:
             "success": success,
             "cli_used": cli.cli_type.value,
             "has_changes": has_changes,
-            "message": f"{'Successfully' if success else 'Failed to'} execute with {cli.cli_type.value}",
+            "message": f"{('Successfully' if success else 'Failed to')} execute with {cli.cli_type.value}",
             "error": "Execution failed" if not success else None,
             "messages_count": len(messages_collected)
         }
@@ -1532,3 +1801,211 @@ class UnifiedCLIManager:
             "configured": False,
             "error": f"CLI type {cli_type.value} not implemented"
         }
+
+    async def execute_tool_with_retry(self, function_call: dict, max_retries: int = 2):
+        for attempt in range(max_retries + 1):
+            result = await self._execute_tool(function_call)
+            if result["success"] or attempt == max_retries:
+                return result
+            await asyncio.sleep(1.5 ** attempt)
+
+    async def _execute_tool(self, function_call: dict) -> Dict[str, Any]:
+        tool_name = function_call.get("name")
+        tool_args = function_call.get("args", {})
+
+        try:
+            if tool_name == "run_shell_command":
+                return await self._run_shell_command(**tool_args)
+            elif tool_name == "write_file":
+                return await self._write_file(**tool_args)
+            else:
+                return {
+                    "success": False,
+                    "error": {
+                        "type": "ToolNotFound",
+                        "message": f"Tool '{tool_name}' is not a valid tool."
+                    }
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": {
+                    "type": e.__class__.__name__,
+                    "message": str(e)
+                }
+            }
+
+    def _get_safe_path(self, path: str) -> str:
+        repo_path = os.path.abspath(os.path.join(self.project_path, "repo"))
+        if not os.path.exists(repo_path):
+            repo_path = os.path.abspath(self.project_path)
+
+        resolved_path = os.path.abspath(os.path.join(repo_path, path))
+
+        if not resolved_path.startswith(repo_path):
+            raise PermissionError(f"Path traversal attempt: '{path}' resolves outside of the project sandbox.")
+        
+        return resolved_path
+
+    def _analyze_shell_command(self, command: str):
+        DANGEROUS_PATTERNS = {
+            "rm": [r"\-rf\s+/", r"\-rf\s+\*"],
+            "chmod": [r"777"],
+        }
+        parts = command.split()
+        cmd = parts[0]
+        if cmd in DANGEROUS_PATTERNS:
+            for pattern in DANGEROUS_PATTERNS[cmd]:
+                if re.search(pattern, command):
+                    raise ValueError(f"Dangerous command pattern detected: '{command}'")
+
+    @monitor_tool_execution("run_shell_command")
+    async def _run_shell_command(self, command: str) -> Dict[str, Any]:
+        self._analyze_shell_command(command)
+        
+        repo_path = os.path.join(self.project_path, "repo")
+        if not os.path.exists(repo_path):
+            repo_path = self.project_path
+
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=repo_path
+        )
+        stdout, stderr = await process.communicate()
+
+        if process.returncode == 0:
+            return {"success": True, "stdout": stdout.decode()}
+        else:
+            return {"success": False, "stderr": stderr.decode(), "exit_code": process.returncode}
+
+    @monitor_tool_execution("write_file")
+    async def _write_file(self, file_path: str, content: str) -> Dict[str, Any]:
+        MAX_FILE_SIZE = 5 * 1024 * 1024 # 5MB
+        if len(content) > MAX_FILE_SIZE:
+            return {
+                "success": False,
+                "error": {
+                    "type": "FileSizeExceeded",
+                    "message": f"File content exceeds the maximum size of {MAX_FILE_SIZE} bytes."
+                }
+            }
+            
+        safe_path = self._get_safe_path(file_path)
+        try:
+            with open(safe_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {"success": True, "path": file_path}
+        except Exception as e:
+            return {
+                "success": False,
+                "error": {
+                    "type": e.__class__.__name__,
+                    "message": str(e)
+                }
+            }
+
+    async def execute_tool_with_retry(self, function_call: dict, max_retries: int = 2):
+        for attempt in range(max_retries + 1):
+            result = await self._execute_tool(function_call)
+            if result["success"] or attempt == max_retries:
+                return result
+            await asyncio.sleep(1.5 ** attempt)
+
+    async def _execute_tool(self, function_call: dict) -> Dict[str, Any]:
+        tool_name = function_call.get("name")
+        tool_args = function_call.get("args", {})
+
+        try:
+            if tool_name == "run_shell_command":
+                return await self._run_shell_command(**tool_args)
+            elif tool_name == "write_file":
+                return await self._write_file(**tool_args)
+            else:
+                return {
+                    "success": False,
+                    "error": {
+                        "type": "ToolNotFound",
+                        "message": f"Tool '{tool_name}' is not a valid tool."
+                    }
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": {
+                    "type": e.__class__.__name__,
+                    "message": str(e)
+                }
+            }
+
+    def _get_safe_path(self, path: str) -> str:
+        repo_path = os.path.abspath(os.path.join(self.project_path, "repo"))
+        if not os.path.exists(repo_path):
+            repo_path = os.path.abspath(self.project_path)
+
+        resolved_path = os.path.abspath(os.path.join(repo_path, path))
+
+        if not resolved_path.startswith(repo_path):
+            raise PermissionError(f"Path traversal attempt: '{path}' resolves outside of the project sandbox.")
+        
+        return resolved_path
+
+    def _analyze_shell_command(self, command: str):
+        DANGEROUS_PATTERNS = {
+            "rm": [r"\-rf\s+/", r"\-rf\s+\*"],
+            "chmod": [r"777"],
+        }
+        parts = command.split()
+        cmd = parts[0]
+        if cmd in DANGEROUS_PATTERNS:
+            for pattern in DANGEROUS_PATTERNS[cmd]:
+                if re.search(pattern, command):
+                    raise ValueError(f"Dangerous command pattern detected: '{command}'")
+
+    @monitor_tool_execution("run_shell_command")
+    async def _run_shell_command(self, command: str) -> Dict[str, Any]:
+        self._analyze_shell_command(command)
+        
+        repo_path = os.path.join(self.project_path, "repo")
+        if not os.path.exists(repo_path):
+            repo_path = self.project_path
+
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=repo_path
+        )
+        stdout, stderr = await process.communicate()
+
+        if process.returncode == 0:
+            return {"success": True, "stdout": stdout.decode()}
+        else:
+            return {"success": False, "stderr": stderr.decode(), "exit_code": process.returncode}
+
+    @monitor_tool_execution("write_file")
+    async def _write_file(self, file_path: str, content: str) -> Dict[str, Any]:
+        MAX_FILE_SIZE = 5 * 1024 * 1024 # 5MB
+        if len(content) > MAX_FILE_SIZE:
+            return {
+                "success": False,
+                "error": {
+                    "type": "FileSizeExceeded",
+                    "message": f"File content exceeds the maximum size of {MAX_FILE_SIZE} bytes."
+                }
+            }
+            
+        safe_path = self._get_safe_path(file_path)
+        try:
+            with open(safe_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {"success": True, "path": file_path}
+        except Exception as e:
+            return {
+                "success": False,
+                "error": {
+                    "type": e.__class__.__name__,
+                    "message": str(e)
+                }
+            }

@@ -77,7 +77,7 @@ const CLI_OPTIONS: CLIOption[] = [
     color: 'from-[#DE7356] to-[#e88a6f]',
     downloadUrl: 'https://github.com/google-gemini/gemini-cli',
     installCommand: 'npm install -g @google/generative-ai-cli',
-    enabled: false,
+    enabled: true,
     models: [
       { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
       { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
@@ -553,6 +553,9 @@ export default function GlobalSettings({ isOpen, onClose, initialTab = 'general'
                                 {cli.id === 'cursor' && (
                                   <img src="/cursor.png" alt="Cursor" className="w-5 h-5" />
                                 )}
+                                {cli.id === 'gemini' && (
+                                  <img src="/gemini.png" alt="Gemini" className="w-5 h-5" />
+                                )}
                                 <h4 className="font-medium text-gray-900 dark:text-white">{cli.name}</h4>
                                 {isChecking ? (
                                   <span className="text-xs bg-yellow-100 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 px-2 py-1 rounded-full">
@@ -633,6 +636,9 @@ export default function GlobalSettings({ isOpen, onClose, initialTab = 'general'
                                       )}
                                       {cli.id === 'cursor' && (
                                         <img src="/cursor.png" alt="Cursor" className="w-5 h-5" />
+                                      )}
+                                      {cli.id === 'gemini' && (
+                                        <img src="/gemini.png" alt="Gemini" className="w-5 h-5" />
                                       )}
                                       <h4 className="font-medium text-gray-900 dark:text-white">{cli.name}</h4>
                                       {isChecking ? (

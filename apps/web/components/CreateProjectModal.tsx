@@ -69,7 +69,7 @@ const CLI_OPTIONS: CLIOption[] = [
     id: 'gemini',
     name: 'Gemini CLI',
     icon: '💎',
-    description: 'Google Gemini with thinking capabilities (Coming Soon)',
+    description: 'Google Gemini with thinking capabilities',
     color: 'from-[#DE7356] to-[#e88a6f]',
     downloadUrl: 'https://github.com/google-gemini/gemini-cli',
     installCommand: 'npm install -g @google/generative-ai-cli',
@@ -78,7 +78,7 @@ const CLI_OPTIONS: CLIOption[] = [
       { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Fast and versatile multimodal model', supportsImages: true },
     ],
     features: ['Adaptive thinking', 'Web search', '1M context window'],
-    enabled: false
+    enabled: true
   },
   {
     id: 'codex',
