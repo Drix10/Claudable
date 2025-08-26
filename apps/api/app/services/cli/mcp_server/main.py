@@ -214,6 +214,18 @@ async def execute_tool_internal(request: dict):
                     {})
         
         logger.info(f"Executing tool: {tool_name} with args: {arguments}")
+
+        # Alias support: accept both namespaced and plain tool names
+        TOOL_ALIASES = {
+            "claudable-tools/run_shell_command": "run_shell_command",
+            "claudable-tools/write_file": "write_file",
+            "claudable-tools/read_file": "read_file",
+            "claudable-tools/replace": "replace",
+            "claudable-tools/list_directory": "list_directory",
+            "claudable-tools/glob": "glob",
+            "claudable-tools/search_file_content": "search_file_content",
+        }
+        tool_name = TOOL_ALIASES.get(tool_name, tool_name)
         
         if not tool_name:
             error_response = {
