@@ -139,6 +139,16 @@ Not every interaction requires code changes - you're happy to discuss architectu
 - **Always** follow the established patterns in the existing codebase
 - **Always** use the specified tech stack (Next.js 15, Supabase, Vercel, Zod)
 
+## Available Tools
+
+### Google Search
+You can perform a Google search by using the `WebFetch` tool with the following URL format: `http://localhost:8000/api/search?q=<your_search_query>`.
+
+For example, to search for "how to use react hooks", you would use:
+`WebFetch(url="http://localhost:8000/api/search?q=how+to+use+react+hooks")`
+
+The search results will be returned in JSON format.
+
 ## Rules
 - Always run "npm run build" after completing code changes to verify the build works correctly
 - Never run "npm run dev" or start servers; the user will handle server processes

@@ -15,6 +15,7 @@ from enum import Enum
 import tempfile
 import base64
 import platform
+import socket
 
 from app.core.monitoring import monitor_tool_execution
 
@@ -1329,6 +1330,471 @@ class CursorAgentCLI(BaseCLI):
         # Fallback to in-memory storage
         self._session_store[project_id] = session_id
         print(f"💾 [Cursor] Session ID stored in memory for project {project_id}: {session_id}")
+
+
+class GeminiCLI(BaseCLI):
+    """Gemini CLI implementation"""
+
+    def __init__(self):
+        super().__init__(CLIType.GEMINI)
+        self._session_store: Dict[str, str] = {}
+
+    def _find_free_port(self):
+        """Finds a free port on localhost."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            return s.getsockname()[1]
+
+    async def check_availability(self) -> Dict[str, Any]:
+        """Check if Gemini CLI is available"""
+        try:
+            result = await asyncio.create_subprocess_shell(
+                "gemini -h",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+            
+            if result.returncode != 0:
+                return {
+                    "available": False,
+                    "configured": False,
+                    "error": "Gemini CLI not installed or not working.\n\nTo install:\n1. Install Gemini CLI: npm install -g @google/generative-ai-cli\n2. Configure API Key: gemini config set GOOGLE_API_KEY <your_key>"
+                }
+            
+            help_output = stdout.decode() + stderr.decode()
+            if "gemini" not in help_output.lower():
+                return {
+                    "available": False,
+                    "configured": False,
+                    "error": "Gemini CLI not responding correctly."
+                }
+            
+            return {
+                "available": True,
+                "configured": True,
+                "models": self.get_supported_models(),
+                "default_models": ["gemini-2.5-pro", "gemini-2.5-flash"]
+            }
+        except Exception as e:
+            return {
+                "available": False,
+                "configured": False,
+                "error": f"Failed to check Gemini CLI: {str(e)}"
+            }
+
+    async def execute_with_streaming(
+        self,
+        instruction: str,
+        project_path: str,
+        session_id: Optional[str] = None,
+        log_callback: Optional[Callable] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        is_initial_prompt: bool = False,
+        unified_cli_manager: 'UnifiedCLIManager' = None
+    ) -> AsyncGenerator[Message, None]:
+        """Execute instruction using Gemini CLI with a dynamically managed MCP server."""
+        from app.core.terminal_ui import ui
+        
+        mcp_server_process = None
+        settings_file = None
+        try:
+            # 1. Start MCP Server on a free port
+            port = self._find_free_port()
+            ui.info(f"Starting MCP server on port {port}", "GeminiCLI")
+            
+            # Correctly locate the mcp_server.main module
+            mcp_server_module_path = "app.services.cli.mcp_server.main"
+
+            mcp_server_process = await asyncio.create_subprocess_exec(
+                "python", "-m", mcp_server_module_path, "--port", str(port),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await asyncio.sleep(2)  # Give server time to start
+
+            # 2. Create a temporary settings file for Gemini CLI
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".json") as sf:
+                settings_file = sf.name
+                mcp_server_config = {
+                    "mcpServers": [{
+                        "name": "claudable-tools",
+                        "transport": "http",
+                        "command": ["python", "-m", mcp_server_module_path, "--port", str(port)],
+                        "readiness": {"http": "/tools"}
+                    }]
+                }
+                json.dump(mcp_server_config, sf)
+            
+            ui.debug(f"Created temporary Gemini settings file: {settings_file}", "GeminiCLI")
+
+            # 3. Invoke gemini Command
+            cmd = [
+                "gemini",
+                "-p", instruction,
+                "--allowed-mcp-server-names", "claudable-tools"
+            ]
+            cli_model = self._get_cli_model_name(model)
+            if cli_model:
+                cmd.extend(["--model", cli_model])
+
+            ui.info(f"Executing Gemini command: {' '.join(cmd)}", "GeminiCLI")
+            
+            if platform.system() == "Windows":
+                # Use list2cmdline to safely quote arguments for the shell
+                command_str = subprocess.list2cmdline(cmd)
+                process = await asyncio.create_subprocess_shell(
+                    command_str,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_path,
+                    env={**os.environ, "GEMINI_SETTINGS_PATH": settings_file}
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_path,
+                    env={**os.environ, "GEMINI_SETTINGS_PATH": settings_file}
+                )
+
+            # 4. Process Output Stream
+            buffer = ""
+            async for line in process.stdout:
+                line_str = line.decode()
+                buffer += line_str
+
+                # Process buffer line by line
+                while '\n' in buffer:
+                    line_to_process, buffer = buffer.split('\n', 1)
+                    line_to_process = line_to_process.strip()
+                    if not line_to_process:
+                        continue
+
+                    try:
+                        # Attempt to parse as JSON (tool call, etc.)
+                        data = json.loads(line_to_process)
+                        # Here you would add logic to handle different JSON structures
+                        # For now, we'll just yield it as a generic message
+                        yield Message(
+                            id=str(uuid.uuid4()),
+                            project_id=project_path,
+                            role="assistant",
+                            message_type="tool_use", # Assuming JSON is a tool call
+                            content=json.dumps(data, indent=2),
+                            metadata_json={"cli_type": self.cli_type.value, "parsed_json": True, "data": data},
+                            session_id=session_id,
+                            created_at=datetime.utcnow()
+                        )
+                    except json.JSONDecodeError:
+                        # If not JSON, treat as plain text
+                        yield Message(
+                            id=str(uuid.uuid4()),
+                            project_id=project_path,
+                            role="assistant",
+                            message_type="chat",
+                            content=line_to_process,
+                            metadata_json={"cli_type": self.cli_type.value},
+                            session_id=session_id,
+                            created_at=datetime.utcnow()
+                        )
+            
+            # Process any remaining buffer content
+            if buffer.strip():
+                yield Message(
+                    id=str(uuid.uuid4()),
+                    project_id=project_path,
+                    role="assistant",
+                    message_type="chat",
+                    content=buffer.strip(),
+                    metadata_json={"cli_type": self.cli_type.value},
+                    session_id=session_id,
+                    created_at=datetime.utcnow()
+                )
+
+            stderr_output = await process.stderr.read()
+            if stderr_output:
+                ui.error(f"Gemini CLI stderr: {stderr_output.decode()}", "GeminiCLI")
+                yield Message(
+                    id=str(uuid.uuid4()),
+                    project_id=project_path,
+                    role="assistant",
+                    message_type="error",
+                    content=stderr_output.decode().strip(),
+                    metadata_json={"cli_type": self.cli_type.value},
+                    session_id=session_id,
+                    created_at=datetime.utcnow()
+                )
+
+        except Exception as e:
+            ui.error(f"An exception occurred during Gemini CLI execution: {e}", "GeminiCLI")
+            yield Message(
+                id=str(uuid.uuid4()),
+                project_id=project_path,
+                role="assistant",
+                message_type="error",
+                content=str(e),
+                metadata_json={"cli_type": self.cli_type.value, "exception": True},
+                session_id=session_id,
+                created_at=datetime.utcnow()
+            )
+        finally:
+            # 5. Shutdown MCP Server and clean up
+            if mcp_server_process:
+                try:
+                    mcp_server_process.terminate()
+                    await mcp_server_process.wait()
+                    ui.info("MCP server terminated.", "GeminiCLI")
+                except ProcessLookupError:
+                    ui.warning("MCP server process already terminated.", "GeminiCLI")
+
+            if settings_file and os.path.exists(settings_file):
+                os.remove(settings_file)
+                ui.debug(f"Removed temporary settings file: {settings_file}", "GeminiCLI")
+
+
+    async def get_session_id(self, project_id: str) -> Optional[str]:
+        """Get current session ID for project"""
+        return self._session_store.get(project_id)
+
+    async def set_session_id(self, project_id: str, session_id: str) -> None:
+        """Set session ID for project"""
+        self._session_store[project_id] = session_id
+
+
+class GeminiCLI(BaseCLI):
+    """Gemini CLI implementation"""
+
+    def __init__(self):
+        super().__init__(CLIType.GEMINI)
+        self._session_store: Dict[str, str] = {}
+
+
+    def _find_free_port(self):
+        """Finds a free port on localhost."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            return s.getsockname()[1]
+
+    async def check_availability(self) -> Dict[str, Any]:
+        """Check if Gemini CLI is available"""
+        try:
+            result = await asyncio.create_subprocess_shell(
+                "gemini -h",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+            
+            if result.returncode != 0:
+                return {
+                    "available": False,
+                    "configured": False,
+                    "error": "Gemini CLI not installed or not working.\n\nTo install:\n1. Install Gemini CLI: npm install -g @google/generative-ai-cli\n2. Configure API Key: gemini config set GOOGLE_API_KEY <your_key>"
+                }
+            
+            help_output = stdout.decode() + stderr.decode()
+            if "gemini" not in help_output.lower():
+                return {
+                    "available": False,
+                    "configured": False,
+                    "error": "Gemini CLI not responding correctly."
+                }
+            
+            return {
+                "available": True,
+                "configured": True,
+                "models": self.get_supported_models(),
+                "default_models": ["gemini-2.5-pro", "gemini-2.5-flash"]
+            }
+        except Exception as e:
+            return {
+                "available": False,
+                "configured": False,
+                "error": f"Failed to check Gemini CLI: {str(e)}"
+            }
+
+    async def execute_with_streaming(
+        self,
+        instruction: str,
+        project_path: str,
+        session_id: Optional[str] = None,
+        log_callback: Optional[Callable] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        is_initial_prompt: bool = False,
+        unified_cli_manager: 'UnifiedCLIManager' = None
+    ) -> AsyncGenerator[Message, None]:
+        """Execute instruction using Gemini CLI with a dynamically managed MCP server."""
+        from app.core.terminal_ui import ui
+        
+        mcp_server_process = None
+        settings_file = None
+        try:
+            # 1. Start MCP Server on a free port
+            port = self._find_free_port()
+            ui.info(f"Starting MCP server on port {port}", "GeminiCLI")
+            
+            # Correctly locate the mcp_server.main module
+            mcp_server_module_path = "app.services.cli.mcp_server.main"
+
+            mcp_server_process = await asyncio.create_subprocess_exec(
+                "python", "-m", mcp_server_module_path, "--port", str(port),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await asyncio.sleep(2)  # Give server time to start
+
+            # 2. Create a temporary settings file for Gemini CLI
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".json") as sf:
+                settings_file = sf.name
+                mcp_server_config = {
+                    "mcpServers": [{
+                        "name": "claudable-tools",
+                        "transport": "http",
+                        "command": ["python", "-m", mcp_server_module_path, "--port", str(port)],
+                        "readiness": {"http": "/tools"}
+                    }]
+                }
+                json.dump(mcp_server_config, sf)
+            
+            ui.debug(f"Created temporary Gemini settings file: {settings_file}", "GeminiCLI")
+
+            # 3. Invoke gemini Command
+            cmd = [
+                "gemini",
+                "-p", instruction,
+                "--allowed-mcp-server-names", "claudable-tools"
+            ]
+            cli_model = self._get_cli_model_name(model)
+            if cli_model:
+                cmd.extend(["--model", cli_model])
+
+            ui.info(f"Executing Gemini command: {' '.join(cmd)}", "GeminiCLI")
+            
+            if platform.system() == "Windows":
+                # Use list2cmdline to safely quote arguments for the shell
+                command_str = subprocess.list2cmdline(cmd)
+                process = await asyncio.create_subprocess_shell(
+                    command_str,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_path,
+                    env={**os.environ, "GEMINI_SETTINGS_PATH": settings_file}
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_path,
+                    env={**os.environ, "GEMINI_SETTINGS_PATH": settings_file}
+                )
+
+            # 4. Process Output Stream
+            buffer = ""
+            async for line in process.stdout:
+                line_str = line.decode()
+                buffer += line_str
+
+                # Process buffer line by line
+                while '\n' in buffer:
+                    line_to_process, buffer = buffer.split('\n', 1)
+                    line_to_process = line_to_process.strip()
+                    if not line_to_process:
+                        continue
+
+                    try:
+                        # Attempt to parse as JSON (tool call, etc.)
+                        data = json.loads(line_to_process)
+                        # Here you would add logic to handle different JSON structures
+                        # For now, we'll just yield it as a generic message
+                        yield Message(
+                            id=str(uuid.uuid4()),
+                            project_id=project_path,
+                            role="assistant",
+                            message_type="tool_use", # Assuming JSON is a tool call
+                            content=json.dumps(data, indent=2),
+                            metadata_json={"cli_type": self.cli_type.value, "parsed_json": True, "data": data},
+                            session_id=session_id,
+                            created_at=datetime.utcnow()
+                        )
+                    except json.JSONDecodeError:
+                        # If not JSON, treat as plain text
+                        yield Message(
+                            id=str(uuid.uuid4()),
+                            project_id=project_path,
+                            role="assistant",
+                            message_type="chat",
+                            content=line_to_process,
+                            metadata_json={"cli_type": self.cli_type.value},
+                            session_id=session_id,
+                            created_at=datetime.utcnow()
+                        )
+            
+            # Process any remaining buffer content
+            if buffer.strip():
+                yield Message(
+                    id=str(uuid.uuid4()),
+                    project_id=project_path,
+                    role="assistant",
+                    message_type="chat",
+                    content=buffer.strip(),
+                    metadata_json={"cli_type": self.cli_type.value},
+                    session_id=session_id,
+                    created_at=datetime.utcnow()
+                )
+
+            stderr_output = await process.stderr.read()
+            if stderr_output:
+                ui.error(f"Gemini CLI stderr: {stderr_output.decode()}", "GeminiCLI")
+                yield Message(
+                    id=str(uuid.uuid4()),
+                    project_id=project_path,
+                    role="assistant",
+                    message_type="error",
+                    content=stderr_output.decode().strip(),
+                    metadata_json={"cli_type": self.cli_type.value},
+                    session_id=session_id,
+                    created_at=datetime.utcnow()
+                )
+
+        except Exception as e:
+            ui.error(f"An exception occurred during Gemini CLI execution: {e}", "GeminiCLI")
+            yield Message(
+                id=str(uuid.uuid4()),
+                project_id=project_path,
+                role="assistant",
+                message_type="error",
+                content=str(e),
+                metadata_json={"cli_type": self.cli_type.value, "exception": True},
+                session_id=session_id,
+                created_at=datetime.utcnow()
+            )
+        finally:
+            # 5. Shutdown MCP Server and clean up
+            if mcp_server_process:
+                try:
+                    mcp_server_process.terminate()
+                    await mcp_server_process.wait()
+                    ui.info("MCP server terminated.", "GeminiCLI")
+                except ProcessLookupError:
+                    ui.warning("MCP server process already terminated.", "GeminiCLI")
+
+            if settings_file and os.path.exists(settings_file):
+                os.remove(settings_file)
+                ui.debug(f"Removed temporary settings file: {settings_file}", "GeminiCLI")
+
+
+    async def get_session_id(self, project_id: str) -> Optional[str]:
+        """Get current session ID for project"""
+        return self._session_store.get(project_id)
+
+    async def set_session_id(self, project_id: str, session_id: str) -> None:
+        """Set session ID for project"""
+        self._session_store[project_id] = session_id
 
 
 import socket

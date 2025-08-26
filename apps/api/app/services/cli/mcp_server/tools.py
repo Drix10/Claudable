@@ -39,4 +39,3 @@ async def execute_tool_streaming(request: dict) -> AsyncGenerator[str, None]:
     })
     
     yield json.dumps(result)
-

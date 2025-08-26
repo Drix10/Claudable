@@ -173,7 +173,7 @@ async def generate_diff_with_logging(
     # Setup Claude Code options with session resumption
     options = ClaudeCodeOptions(
         cwd=repo_path,
-        allowed_tools=["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS"],
+        allowed_tools=["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS", "WebFetch"],
         permission_mode='acceptEdits',
         system_prompt=effective_system_prompt,
         model=DEFAULT_MODEL,  # Use Claude 4 Sonnet model
