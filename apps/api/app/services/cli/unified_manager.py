@@ -1439,7 +1439,6 @@ class GeminiCLI(BaseCLI):
             server_ready = await self._wait_for_mcp_server(port, max_wait=20)
             
             if not server_ready:
-                # Capture server output for debugging
                 try:
                     stdout_task = asyncio.create_task(mcp_server_process.stdout.read(2048))
                     stderr_task = asyncio.create_task(mcp_server_process.stderr.read(2048))
@@ -1454,7 +1453,6 @@ class GeminiCLI(BaseCLI):
                 
                 raise RuntimeError(f"MCP server failed to start on port {port}")
 
-            # Check if process is still running
             if mcp_server_process.returncode is not None:
                 stderr_output = await mcp_server_process.stderr.read()
                 stdout_output = await mcp_server_process.stdout.read()
@@ -1463,11 +1461,9 @@ class GeminiCLI(BaseCLI):
                     f"Stdout: {stdout_output.decode()[:500]}, Stderr: {stderr_output.decode()[:500]}"
                 )
 
-            # 3. Create CORRECT settings file format based on official docs
+            # 3. Create CORRECT settings file format
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".json") as sf:
                 settings_file = sf.name
-                
-                # FIXED: Correct configuration format for Gemini CLI MCP
                 mcp_server_config = {
                     "mcpServers": {
                         "claudable-tools": {
@@ -1481,17 +1477,24 @@ class GeminiCLI(BaseCLI):
                 json.dump(mcp_server_config, sf, indent=2)
             
             ui.debug(f"Created Gemini settings: {settings_file}", "GeminiCLI")
-            ui.debug(f"Config: {json.dumps(mcp_server_config, indent=2)}", "GeminiCLI")
 
             # 4. Verify MCP server is responding correctly
             await self._verify_mcp_server_tools(port)
 
-            # 5. Build Gemini CLI command with corrected flags
+            # 5. Build Gemini CLI command with corrected paths and prompt
+            project_repo_path = os.path.join(project_path, "repo")
+            if not os.path.exists(project_repo_path):
+                project_repo_path = project_path
+            
+            # Normalize path for cross-platform compatibility in prompts and args
+            normalized_repo_path = project_repo_path.replace('\\', '/')
+
             cmd = [
                 "gemini",
                 "--prompt", instruction,
                 "--allowed-mcp-server-names", "claudable-tools",
-                "--approval-mode", "auto_edit"
+                "--approval-mode", "yolo",
+                "--include-directories", "."
             ]
             
             cli_model = self._get_cli_model_name(model)
@@ -1499,14 +1502,11 @@ class GeminiCLI(BaseCLI):
                 cmd.extend(["--model", cli_model])
 
             ui.info(f"Executing Gemini: {' '.join(cmd)}", "GeminiCLI")
-            ui.info(f"Settings: GEMINI_SETTINGS_PATH={settings_file}", "GeminiCLI")
             
-            # Set environment variables
             env = os.environ.copy()
             env["GEMINI_SETTINGS_PATH"] = settings_file
             env["GEMINI_DEBUG"] = "1"
             env["GEMINI_LOG_LEVEL"] = "debug"
-            # Explicitly name the MCP server to match the settings key
             env["GEMINI_ALLOWED_MCP_SERVER_NAMES"] = "claudable-tools"
             
             if platform.system() == "Windows":
@@ -1515,7 +1515,7 @@ class GeminiCLI(BaseCLI):
                     command_str,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=project_path,
+                    cwd=project_repo_path, # CWD should be the OS-native path
                     env=env
                 )
             else:
@@ -1523,30 +1523,22 @@ class GeminiCLI(BaseCLI):
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=project_path,
+                    cwd=project_repo_path,
                     env=env
                 )
 
-            # 6. Process output with enhanced logging
-            message_count = 0
-            
-            # Create tasks for reading stdout and stderr simultaneously
+            # 6. Process output
             stdout_task = self._read_stream(process.stdout, "stdout", session_id, project_path)
             stderr_task = self._read_stream(process.stderr, "stderr", session_id, project_path)
             
-            # Process streams concurrently
             async for message in self._merge_streams(stdout_task, stderr_task):
-                message_count += 1
                 yield message
 
-            # Wait for process completion
             await process.wait()
             ui.info(f"Gemini CLI completed with exit code: {process.returncode}", "GeminiCLI")
             
             if process.returncode != 0:
                 ui.error(f"Gemini CLI failed with exit code: {process.returncode}", "GeminiCLI")
-
-            ui.info(f"Total messages processed: {message_count}", "GeminiCLI")
 
         except Exception as e:
             ui.error(f"Exception in Gemini CLI execution: {str(e)}", "GeminiCLI")
@@ -1561,7 +1553,6 @@ class GeminiCLI(BaseCLI):
                 created_at=datetime.utcnow()
             )
         finally:
-            # Cleanup with better process management
             await self._cleanup_mcp_server(mcp_server_process)
             if settings_file and os.path.exists(settings_file):
                 try:
@@ -1649,16 +1640,24 @@ class GeminiCLI(BaseCLI):
             )
 
     def _create_message_from_line(self, line: str, stream_name: str, session_id: str, project_path: str) -> Message:
-        """Create a Message object from a line of output"""
+        """Create a Message object from a line of output, with robust JSON parsing."""
         message_type = "error" if stream_name == "stderr" else "chat"
         
-        # Try to parse as JSON for structured data
-        try:
-            data = json.loads(line)
-            message_type = "tool_use"
-            content = json.dumps(data, indent=2)
-            metadata = {"cli_type": self.cli_type.value, "parsed_json": True, "data": data, "stream": stream_name}
-        except json.JSONDecodeError:
+        # Robustly try to parse as JSON only if it looks like a JSON object
+        stripped_line = line.strip()
+        if stripped_line.startswith('{') and stripped_line.endswith('}'):
+            try:
+                data = json.loads(stripped_line)
+                # If successful, treat as structured tool data
+                message_type = "tool_use" 
+                content = json.dumps(data, indent=2)
+                metadata = {"cli_type": self.cli_type.value, "parsed_json": True, "data": data, "stream": stream_name}
+            except json.JSONDecodeError:
+                # It looked like JSON but wasn't valid, treat as plain text
+                content = line
+                metadata = {"cli_type": self.cli_type.value, "stream": stream_name, "json_parse_failed": True}
+        else:
+            # Not a JSON object, treat as plain text
             content = line
             metadata = {"cli_type": self.cli_type.value, "stream": stream_name}
         
@@ -1829,6 +1828,7 @@ class UnifiedCLIManager:
             pass
         
         message_count = 0
+        saw_tool_use = False
         
         async for message in cli.execute_with_streaming(
             instruction=instruction,
@@ -1841,6 +1841,8 @@ class UnifiedCLIManager:
             unified_cli_manager=self
         ):
             message_count += 1
+            if message.message_type == "tool_use":
+                saw_tool_use = True
             
             # Check for error messages or result status
             if message.message_type == "error":
@@ -1918,6 +1920,58 @@ class UnifiedCLIManager:
             if message.metadata_json and "changes_made" in message.metadata_json:
                 has_changes = True
         
+        # ACT mode auto-continue fallback: if no tools were used, send a follow-up prompt to begin executing
+        if cli.cli_type == CLIType.GEMINI and not saw_tool_use:
+            ui.info("No tool usage detected; sending ACT auto-continue prompt", "CLI")
+            act_followup = (
+                f"{instruction}\n\n" if instruction else ""
+            ) + (
+                "Begin now. Execute using tools and avoid asking for permission. "
+                "Use only workspace-relative paths. First, list_directory '.' to inspect the repo, "
+                "then glob '**/*.{ts,tsx,js,jsx,json}' to gather context, and proceed to write_file to create the needed app files."
+            )
+
+            async for message in cli.execute_with_streaming(
+                instruction=act_followup,
+                project_path=self.project_path,
+                session_id=self.session_id,
+                log_callback=None,
+                images=images,
+                model=model,
+                is_initial_prompt=False,
+                unified_cli_manager=self
+            ):
+                message_count += 1
+                if message.message_type == "tool_use":
+                    saw_tool_use = True
+                # Save and forward
+                message.project_id = self.project_id
+                message.conversation_id = self.conversation_id
+                self.db.add(message)
+                self.db.commit()
+                should_hide = message.metadata_json and message.metadata_json.get("hidden_from_ui", False)
+                if not should_hide:
+                    ws_message = {
+                        "type": "message",
+                        "data": {
+                            "id": message.id,
+                            "role": message.role,
+                            "message_type": message.message_type,
+                            "content": message.content,
+                            "metadata": message.metadata_json,
+                            "parent_message_id": getattr(message, 'parent_message_id', None),
+                            "session_id": message.session_id,
+                            "conversation_id": self.conversation_id,
+                            "created_at": message.created_at.isoformat()
+                        },
+                        "timestamp": message.created_at.isoformat()
+                    }
+                    try:
+                        await ws_manager.send_message(self.project_id, ws_message)
+                    except Exception as e:
+                        ui.error(f"WebSocket send failed: {e}", "Message")
+                messages_collected.append(message)
+
         # Determine final success status
         # For Cursor: check result_success if available, otherwise check has_error
         # For Claude: check has_error

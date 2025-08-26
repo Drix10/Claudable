@@ -52,101 +52,94 @@ async def list_tools_mcp():
 async def list_tools():
     """List available tools - primary endpoint"""
     logger.info("Tools requested via GET /tools")
-    def with_both_schemas(schema: dict):
-        # Provide both camelCase and snake_case for compatibility
-        return {"inputSchema": schema, "input_schema": schema}
+    
+    def get_schema(schema: dict):
+        return {"input_schema": schema}
 
-    tools = []
-    tools.append({
-        "name": "run_shell_command",
-        "description": "Executes a shell command within a secure, sandboxed environment",
-        **with_both_schemas({
-            "type": "object",
-            "properties": {"command": {"type": "string", "description": "The shell command to execute"}},
-            "required": ["command"]
-        })
-    })
-    tools.append({
-        "name": "write_file",
-        "description": "Writes content to a file",
-        **with_both_schemas({
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Path to the file"},
-                "content": {"type": "string", "description": "Content to write"}
-            },
-            "required": ["file_path", "content"]
-        })
-    })
-    tools.append({
-        "name": "read_file",
-        "description": "Reads content from a file",
-        **with_both_schemas({
-            "type": "object",
-            "properties": {"file_path": {"type": "string", "description": "Path to the file"}},
-            "required": ["file_path"]
-        })
-    })
-    tools.append({
-        "name": "replace",
-        "description": "Replaces text in a file",
-        **with_both_schemas({
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Path to the file"},
-                "old_string": {"type": "string", "description": "Text to replace"},
-                "new_string": {"type": "string", "description": "Replacement text"}
-            },
-            "required": ["file_path", "old_string", "new_string"]
-        })
-    })
-    tools.append({
-        "name": "list_directory",
-        "description": "Lists directory contents",
-        **with_both_schemas({
-            "type": "object",
-            "properties": {"path": {"type": "string", "description": "Directory path"}},
-            "required": ["path"]
-        })
-    })
-    tools.append({
-        "name": "glob",
-        "description": "Find files matching a pattern",
-        **with_both_schemas({
-            "type": "object",
-            "properties": {"pattern": {"type": "string", "description": "Glob pattern"}},
-            "required": ["pattern"]
-        })
-    })
-    tools.append({
-        "name": "search_file_content",
-        "description": "Search for patterns in files",
-        **with_both_schemas({
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "Search pattern"},
-                "path": {"type": "string", "description": "Optional search path"}
-            },
-            "required": ["pattern"]
-        })
-    })
+    tools = [
+        {
+            "name": "run_shell_command",
+            "description": "Executes a shell command within a secure, sandboxed environment",
+            **get_schema({
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "The shell command to execute"}},
+                "required": ["command"]
+            })
+        },
+        {
+            "name": "write_file",
+            "description": "Writes content to a file",
+            **get_schema({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file"},
+                    "content": {"type": "string", "description": "Content to write"}
+                },
+                "required": ["file_path", "content"]
+            })
+        },
+        {
+            "name": "read_file",
+            "description": "Reads content from a file",
+            **get_schema({
+                "type": "object",
+                "properties": {"file_path": {"type": "string", "description": "Path to the file"}},
+                "required": ["file_path"]
+            })
+        },
+        {
+            "name": "replace",
+            "description": "Replaces text in a file",
+            **get_schema({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file"},
+                    "old_string": {"type": "string", "description": "Text to replace"},
+                    "new_string": {"type": "string", "description": "Replacement text"},
+                    "expected_replacements": {"type": "integer", "description": "Number of replacements expected. Defaults to 1."}
+                },
+                "required": ["file_path", "old_string", "new_string"]
+            })
+        },
+        {
+            "name": "list_directory",
+            "description": "Lists directory contents",
+            **get_schema({
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Directory path"}},
+                "required": ["path"]
+            })
+        },
+        {
+            "name": "glob",
+            "description": "Find files matching a pattern",
+            **get_schema({
+                "type": "object",
+                "properties": {"pattern": {"type": "string", "description": "Glob pattern"}},
+                "required": ["pattern"]
+            })
+        },
+        {
+            "name": "search_file_content",
+            "description": "Search for patterns in files",
+            **get_schema({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Search pattern"},
+                    "path": {"type": "string", "description": "Optional search path"},
+                    "include": {"type": "string", "description": "Optional glob pattern to filter files"}
+                },
+                "required": ["pattern"]
+            })
+        }
+    ]
 
-    # Provide additional metadata some clients expect
+    server_name = "claudable-tools"
     tools_response = {
-        "tools": [
-            {
-                **t,
-                # Add namespaced variants and server metadata for clients that require them
-                "fullName": f"claudable-tools/{t['name']}",
-                "server": "claudable-tools",
-                "serverName": "claudable-tools"
-            }
-            for t in tools
-        ],
-        "server": "claudable-tools",
-        "serverName": "claudable-tools"
+        "tools": tools,
+        "server_name": server_name
     }
-    logger.info(f"Returning {len(tools_response['tools'])} tools")
+    logger.info(f"Returning {len(tools_response['tools'])} tools for server '{server_name}'")
     return JSONResponse(tools_response)
 @app.post("/mcp/tools")
 async def list_tools_post_mcp():
@@ -189,21 +182,21 @@ async def execute_tool_alt(request: dict):
     logger.info(f"Tool execution received (alt): {request}")
     return await execute_tool_internal(request)
 
+import os
+
 async def execute_tool_internal(request: dict):
     """Internal tool execution logic"""
     try:
-        # Extract tool name from various possible formats
         tool_name = (request.get("name") or 
                     request.get("tool") or
                     request.get("tool_name") or 
                     request.get("toolName") or
                     (request.get("function") or {}).get("name") or
                     (request.get("tool") or {}).get("name"))
-        # Normalize namespaced tool names like "claudable-tools/run_shell_command"
+        
         if isinstance(tool_name, str) and "/" in tool_name:
             tool_name = tool_name.split("/")[-1]
         
-        # Extract arguments from various possible formats  
         arguments = (request.get("arguments") or
                     request.get("args") or
                     request.get("parameters") or
@@ -213,29 +206,14 @@ async def execute_tool_internal(request: dict):
                     (request.get("tool") or {}).get("input") or
                     {})
         
+        # arguments[arg] = os.path.abspath(os.path.join(repo_path, arguments[arg]))
+        # logger.info(f"Resolved relative path '{arg}' to '{arguments[arg]}'")
+
         logger.info(f"Executing tool: {tool_name} with args: {arguments}")
 
-        # Alias support: accept both namespaced and plain tool names
-        TOOL_ALIASES = {
-            "claudable-tools/run_shell_command": "run_shell_command",
-            "claudable-tools/write_file": "write_file",
-            "claudable-tools/read_file": "read_file",
-            "claudable-tools/replace": "replace",
-            "claudable-tools/list_directory": "list_directory",
-            "claudable-tools/glob": "glob",
-            "claudable-tools/search_file_content": "search_file_content",
-        }
-        tool_name = TOOL_ALIASES.get(tool_name, tool_name)
-        
         if not tool_name:
-            error_response = {
-                "isError": True,
-                "content": [{"type": "text", "text": "Missing tool name in request"}]
-            }
-            logger.error("Missing tool name")
-            return JSONResponse(error_response)
+            return JSONResponse({"isError": True, "content": [{"type": "text", "text": "Missing tool name in request"}]})
         
-        # Get CLI manager and execute tool
         cli_manager = get_cli_manager()
         result = await cli_manager.execute_tool_with_retry({
             "name": tool_name,
@@ -244,26 +222,15 @@ async def execute_tool_internal(request: dict):
         
         logger.info(f"Tool {tool_name} result: {result.get('success', 'unknown')}")
         
-        # Format response for MCP
-        if result.get("success", False):
-            response = {
-                "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
-            }
-        else:
-            response = {
-                "isError": True,
-                "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
-            }
-            
+        response = {
+            "isError": not result.get("success", False),
+            "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
+        }
         return JSONResponse(response)
             
     except Exception as e:
         logger.error(f"Error executing tool: {e}")
-        error_response = {
-            "isError": True,
-            "content": [{"type": "text", "text": f"Internal server error: {str(e)}"}]
-        }
-        return JSONResponse(error_response)
+        return JSONResponse({"isError": True, "content": [{"type": "text", "text": f"Internal server error: {str(e)}"}]})
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
